@@ -1,17 +1,25 @@
 // xtouch_node.cpp
 //
-// Minimal ROS 2 bridge for the Behringer X-Touch Extender (XCtl mode, 8 faders).
+// Minimal ROS 2 bridge for the Behringer X-Touch Extender (MC mode, 8 faders).
 //
 // Protocol (from the Qt reference at reference/qt_midi_control/):
 //   - Fader move : Pitch Bend  0xE0 | ch, LSB, MSB   (ch 0..7, 14-bit value)
 //   - Fader touch: Note On/Off on notes 104..111     (note - 104 -> channel)
-// No MCU/HUI handshake is required; we just listen on the matched port.
+//
+// Motor hold (MC mode quirk): the motorised faders return to whatever position
+// the host last commanded. Without an OUT echo the motor reels every fader to
+// 0 the moment the user lets go. We mirror the reference project's debounce
+// strategy: 100 ms after the last incoming Pitch Bend on a channel, we send
+// that same value back as Pitch Bend OUT, locking the motor in place.
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -27,6 +35,9 @@ namespace {
 constexpr std::size_t kNumChannels = 8;
 constexpr uint8_t kFaderTouchNoteStart = 104;  // 104..111
 constexpr uint8_t kFaderTouchNoteEnd = kFaderTouchNoteStart + kNumChannels - 1;
+constexpr int32_t kFaderValueMax = 16383;      // 14-bit
+constexpr auto kDebounceInterval = std::chrono::milliseconds(100);
+constexpr auto kDebounceTick     = std::chrono::milliseconds(50);
 
 std::string to_upper(std::string s)
 {
@@ -63,44 +74,56 @@ public:
 
     midi_in_ = std::make_unique<RtMidiIn>();
     midi_in_->ignoreTypes(true, true, true);  // SysEx, timing, active sensing
+    open_matching_port(*midi_in_, "input");
 
-    open_matching_port();
+    midi_out_ = std::make_unique<RtMidiOut>();
+    open_matching_port(*midi_out_, "output");
 
+    // Start input callback only after OUT is ready, so the first incoming
+    // Pitch Bend can be echoed back without races.
     midi_in_->setCallback(&XTouchNode::midi_trampoline, this);
 
+    debounce_tick_ = create_wall_timer(kDebounceTick,
+      std::bind(&XTouchNode::tick_debounce, this));
+
     RCLCPP_INFO(get_logger(),
-      "xtouch_node ready. Publishing 8 faders + 8 touches on /xtouch/...");
+      "xtouch_node ready. Publishing 8 faders + 8 touches on /xtouch/...; "
+      "motor hold via 100 ms debounce echo.");
   }
 
   ~XTouchNode() override
   {
     if (midi_in_) {
       midi_in_->cancelCallback();
-      if (midi_in_->isPortOpen()) {
-        midi_in_->closePort();
-      }
+      if (midi_in_->isPortOpen()) { midi_in_->closePort(); }
+    }
+    if (midi_out_ && midi_out_->isPortOpen()) {
+      midi_out_->closePort();
     }
   }
 
 private:
-  void open_matching_port()
+  template <typename Port>
+  void open_matching_port(Port & port, const char * direction)
   {
-    const unsigned int n = midi_in_->getPortCount();
-    RCLCPP_INFO(get_logger(), "Scanning %u MIDI input port(s)...", n);
+    const unsigned int n = port.getPortCount();
+    RCLCPP_INFO(get_logger(), "Scanning %u MIDI %s port(s)...", n, direction);
 
     for (unsigned int i = 0; i < n; ++i) {
-      const std::string name = midi_in_->getPortName(i);
-      RCLCPP_INFO(get_logger(), "  [%u] %s", i, name.c_str());
+      const std::string name = port.getPortName(i);
+      RCLCPP_INFO(get_logger(), "  [%s %u] %s", direction, i, name.c_str());
       if (looks_like_xtouch(name)) {
-        midi_in_->openPort(i);
-        RCLCPP_INFO(get_logger(), "Connected to MIDI port: '%s'", name.c_str());
+        port.openPort(i);
+        RCLCPP_INFO(get_logger(),
+          "Connected MIDI %s port: '%s'", direction, name.c_str());
         return;
       }
     }
 
     throw std::runtime_error(
-      "No MIDI input port matching 'X-Touch'/'XTOUCH'/'Behringer' found. "
-      "Is the device connected and powered on?");
+      std::string("No MIDI ") + direction
+      + " port matching 'X-Touch'/'XTOUCH'/'Behringer' found. "
+        "Is the device connected and powered on?");
   }
 
   static void midi_trampoline(double /*ts*/, std::vector<unsigned char> * msg,
@@ -125,6 +148,16 @@ private:
       std_msgs::msg::Int32 m;
       m.data = value;
       fader_pubs_[channel]->publish(m);
+
+      // Arm the per-channel debounce so we echo this position back to the
+      // device 100 ms after the user stops moving the fader.
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        last_fader_value_[channel] = value;
+        debounce_deadline_[channel] =
+          std::chrono::steady_clock::now() + kDebounceInterval;
+      }
+
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
         "fader[%u] = %d", channel, value);
       return;
@@ -145,11 +178,57 @@ private:
     }
   }
 
-  std::unique_ptr<RtMidiIn> midi_in_;
+  void tick_debounce()
+  {
+    const auto now = std::chrono::steady_clock::now();
+    for (std::size_t ch = 0; ch < kNumChannels; ++ch) {
+      int32_t value = 0;
+      bool fire = false;
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        if (debounce_deadline_[ch].has_value()
+            && now >= *debounce_deadline_[ch]) {
+          value = last_fader_value_[ch];
+          debounce_deadline_[ch].reset();
+          fire = true;
+        }
+      }
+      if (fire) {
+        send_fader_pitch_bend(static_cast<uint8_t>(ch), value);
+      }
+    }
+  }
+
+  void send_fader_pitch_bend(uint8_t ch, int32_t value)
+  {
+    value = std::clamp<int32_t>(value, 0, kFaderValueMax);
+    std::vector<unsigned char> bytes = {
+      static_cast<unsigned char>(0xE0 | (ch & 0x0F)),
+      static_cast<unsigned char>(value & 0x7F),         // LSB
+      static_cast<unsigned char>((value >> 7) & 0x7F),  // MSB
+    };
+    try {
+      midi_out_->sendMessage(&bytes);
+    } catch (const RtMidiError & e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "MIDI out failed on ch %u: %s", ch, e.what());
+    }
+  }
+
+  std::unique_ptr<RtMidiIn>  midi_in_;
+  std::unique_ptr<RtMidiOut> midi_out_;
+
   std::array<rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr, kNumChannels>
     fader_pubs_;
   std::array<rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr, kNumChannels>
     touch_pubs_;
+
+  std::mutex state_mutex_;
+  std::array<int32_t, kNumChannels> last_fader_value_{};
+  std::array<std::optional<std::chrono::steady_clock::time_point>, kNumChannels>
+    debounce_deadline_{};
+
+  rclcpp::TimerBase::SharedPtr debounce_tick_;
 };
 
 
