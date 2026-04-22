@@ -57,6 +57,30 @@ ros2 topic hz   /xtouch/fader/ch0  # 슬라이딩 중 퍼블리시 주기 측정
 | `/xtouch/fader/ch0` … `ch7`  | `std_msgs/Int32` | 14-bit 페이더 값, `0..16383`          |
 | `/xtouch/touch/ch0` … `ch7`  | `std_msgs/Bool`  | 페이더에 손가락이 닿아 있는 동안 `true` |
 
+### 메시지 페이로드 예시
+
+`std_msgs/msg/Int32` 와 `std_msgs/msg/Bool` 은 단일 필드 `data` 하나만 가집니다.
+`ros2 topic echo` 출력은 YAML 형태로 한 메시지씩 표시됩니다.
+
+```yaml
+# /xtouch/fader/ch0  (페이더 움직임)
+---
+data: 8192      # 슬라이더 중앙 근처
+---
+data: 16383     # 최상단
+---
+
+# /xtouch/touch/ch0  (페이더 터치/릴리즈)
+---
+data: true      # 손가락 접촉
+---
+data: false     # 손 떼는 순간
+---
+```
+
+이벤트 기반 발행(주기 X)이므로, 장치 입력이 없으면 토픽에도 아무 값이 나오지 않습니다.
+상세 프로토콜 매핑과 정규화 팁은 `README.md` 의 "메시지 형식" 참조.
+
 ## 트러블슈팅
 
 - **`No MIDI input port matching ...`** — 장치가 연결되지 않았거나 전원이 꺼져 있습니다.
