@@ -1,0 +1,25 @@
+# ============================================================================
+# apt package list for ros2_midi / xtouch_midi node
+# Target: Ubuntu 22.04 (jammy) + ROS 2 Humble
+# Usage: bash deps/install_deps.sh (adds ROS 2 repo, then `apt install` these)
+# ============================================================================
+
+# --- Build toolchain ---
+build-essential
+cmake
+pkg-config
+git
+curl
+gnupg
+lsb-release
+locales
+
+# --- ROS 2 Humble (ros-base is enough: no GUI, headless node) ---
+ros-humble-ros-base
+ros-dev-tools
+
+# --- MIDI (C++ wrapper over ALSA) ---
+librtmidi-dev
+
+# --- ALSA runtime (required by RtMidi on Linux) ---
+libasound2-dev

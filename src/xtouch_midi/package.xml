@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>xtouch_midi</name>
+  <version>0.1.0</version>
+  <description>
+    Minimal ROS 2 bridge for the Behringer X-Touch Extender: reads 8 fader
+    positions and touch states over MIDI (RtMidi/ALSA) and publishes them as
+    per-channel topics.
+  </description>
+  <maintainer email="monster529@gentlemonster.com">shs</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+
+  <build_depend>pkg-config</build_depend>
+  <depend>librtmidi-dev</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
