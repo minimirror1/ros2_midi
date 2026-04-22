@@ -1,32 +1,31 @@
-# Quick Start
+# 퀵 스타트
 
-Get the `xtouch_midi` node up and streaming fader data in under a minute,
-assuming dependencies are already installed (see `deps/install_deps.sh`) and
-the workspace has been built (`colcon build --symlink-install`).
+의존성이 설치되어 있고(`deps/install_deps.sh` 참고) 워크스페이스가 빌드되어 있다면
+(`colcon build --symlink-install`), 아래 순서대로 1분 안에 `xtouch_midi` 노드를
+기동하고 페이더 데이터를 스트리밍할 수 있습니다.
 
-## 1. Plug in the device
+## 1. 장치 연결
 
-Connect the Behringer **X-Touch Extender** via USB and power it on.
-Verify the OS sees it:
+Behringer **X-Touch Extender**를 USB로 연결하고 전원을 켭니다. OS에서 인식되는지 확인:
 
 ```bash
-amidi -l    # expect a row containing "X-Touch-Ext"
+amidi -l    # "X-Touch-Ext" 가 포함된 행이 보여야 함
 ```
 
-## 2. Source the environment
+## 2. 환경 소싱
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/hexapod/Desktop/ros2_midi/install/setup.bash
 ```
 
-## 3. Run the node
+## 3. 노드 실행
 
 ```bash
 ros2 run xtouch_midi xtouch_node
 ```
 
-Expected startup log:
+정상 기동 시 로그 예시:
 
 ```
 [INFO] xtouch_node: Scanning N MIDI input port(s)...
@@ -35,34 +34,34 @@ Expected startup log:
 [INFO] xtouch_node: xtouch_node ready. Publishing 8 faders + 8 touches on /xtouch/...
 ```
 
-## 4. Observe the topics (in another terminal)
+## 4. 토픽 확인 (다른 터미널)
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/hexapod/Desktop/ros2_midi/install/setup.bash
 
-ros2 topic list | grep xtouch      # 16 topics: fader/ch0..ch7, touch/ch0..ch7
-ros2 topic echo /xtouch/fader/ch0  # move slider 1 -> 0..16383
-ros2 topic echo /xtouch/touch/ch0  # touch slider 1 -> true/false
-ros2 topic hz   /xtouch/fader/ch0  # publish rate while sliding
+ros2 topic list | grep xtouch      # 16개 토픽: fader/ch0..ch7, touch/ch0..ch7
+ros2 topic echo /xtouch/fader/ch0  # 1번 슬라이더 움직임 -> 0..16383
+ros2 topic echo /xtouch/touch/ch0  # 1번 슬라이더 터치  -> true/false
+ros2 topic hz   /xtouch/fader/ch0  # 슬라이딩 중 퍼블리시 주기 측정
 ```
 
-## 5. Stop the node
+## 5. 노드 종료
 
-`Ctrl+C` in the terminal running `ros2 run`.
+`ros2 run` 이 실행 중인 터미널에서 `Ctrl+C`.
 
-## Topic reference
+## 토픽 레퍼런스
 
-| Topic                        | Type             | Payload                          |
-| ---------------------------- | ---------------- | -------------------------------- |
-| `/xtouch/fader/ch0` … `ch7`  | `std_msgs/Int32` | 14-bit fader value, `0..16383`   |
-| `/xtouch/touch/ch0` … `ch7`  | `std_msgs/Bool`  | `true` while finger on the strip |
+| Topic                        | Type             | Payload                              |
+| ---------------------------- | ---------------- | ------------------------------------ |
+| `/xtouch/fader/ch0` … `ch7`  | `std_msgs/Int32` | 14-bit 페이더 값, `0..16383`          |
+| `/xtouch/touch/ch0` … `ch7`  | `std_msgs/Bool`  | 페이더에 손가락이 닿아 있는 동안 `true` |
 
-## Troubleshooting
+## 트러블슈팅
 
-- **`No MIDI input port matching ...`** — device not connected or not
-  powered. Run `amidi -l` and confirm an `X-Touch-Ext` row appears.
-- **`Permission denied` on the MIDI device** — add your user to the `audio`
-  group: `sudo usermod -aG audio $USER`, then log out and back in.
-- **Topics not showing up** — ROS 2 DDS discovery can take ~1 s. Wait a
-  moment and re-run `ros2 topic list`.
+- **`No MIDI input port matching ...`** — 장치가 연결되지 않았거나 전원이 꺼져 있습니다.
+  `amidi -l` 을 실행해 `X-Touch-Ext` 행이 나오는지 확인하세요.
+- **MIDI 장치 `Permission denied`** — 사용자를 `audio` 그룹에 추가:
+  `sudo usermod -aG audio $USER` 후 로그아웃 → 재로그인.
+- **토픽이 보이지 않음** — ROS 2 DDS 디스커버리에 약 1초가 걸릴 수 있습니다. 잠시 기다렸다
+  `ros2 topic list` 를 다시 실행하세요.
