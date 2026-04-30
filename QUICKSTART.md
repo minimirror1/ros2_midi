@@ -25,13 +25,21 @@ source /home/hexapod/Desktop/ros2_midi/install/setup.bash
 ros2 run xtouch_midi xtouch_node
 ```
 
+`target_id` 테스트가 필요하면 실행 시 파라미터를 넘길 수 있습니다.
+
+```bash
+ros2 run xtouch_midi xtouch_node --ros-args \
+  -p target_ids:="[101,102,103,104,105,106,107,108]"
+```
+
 정상 기동 시 로그 예시:
 
 ```
 [INFO] xtouch_node: Scanning N MIDI input port(s)...
 [INFO] xtouch_node:   [i] X-Touch-Ext:X-Touch-Ext X-TOUCH_INT 20:0
-[INFO] xtouch_node: Connected to MIDI port: 'X-Touch-Ext:...'
-[INFO] xtouch_node: xtouch_node ready. Publishing 8 faders + 8 touches on /xtouch/...
+[INFO] xtouch_node: Connected MIDI input port: 'X-Touch-Ext:...'
+[INFO] xtouch_node: Connected MIDI output port: 'X-Touch-Ext:...'
+[INFO] xtouch_node: xtouch_node ready. Publishing per-channel topics and /xtouch/state; Select notes 24..31 map to enabled; motor hold via 100 ms debounce echo.
 ```
 
 ## 4. 토픽 확인 (다른 터미널)
@@ -40,9 +48,10 @@ ros2 run xtouch_midi xtouch_node
 source /opt/ros/humble/setup.bash
 source /home/hexapod/Desktop/ros2_midi/install/setup.bash
 
-ros2 topic list | grep xtouch      # 16개 토픽: fader/ch0..ch7, touch/ch0..ch7
+ros2 topic list | grep xtouch      # 17개 토픽: fader/ch0..ch7, touch/ch0..ch7, state
 ros2 topic echo /xtouch/fader/ch0  # 1번 슬라이더 움직임 -> 0..16383
 ros2 topic echo /xtouch/touch/ch0  # 1번 슬라이더 터치  -> true/false
+ros2 topic echo /xtouch/state      # 전체 8채널 상태 스냅샷
 ros2 topic hz   /xtouch/fader/ch0  # 슬라이딩 중 퍼블리시 주기 측정
 ```
 
@@ -52,10 +61,11 @@ ros2 topic hz   /xtouch/fader/ch0  # 슬라이딩 중 퍼블리시 주기 측정
 
 ## 토픽 레퍼런스
 
-| Topic                        | Type             | Payload                              |
-| ---------------------------- | ---------------- | ------------------------------------ |
-| `/xtouch/fader/ch0` … `ch7`  | `std_msgs/Int32` | 14-bit 페이더 값, `0..16383`          |
-| `/xtouch/touch/ch0` … `ch7`  | `std_msgs/Bool`  | 페이더에 손가락이 닿아 있는 동안 `true` |
+| Topic                        | Type                      | Payload                              |
+| ---------------------------- | ------------------------- | ------------------------------------ |
+| `/xtouch/fader/ch0` … `ch7`  | `std_msgs/Int32`          | 14-bit 페이더 값, `0..16383`          |
+| `/xtouch/touch/ch0` … `ch7`  | `std_msgs/Bool`           | 페이더에 손가락이 닿아 있는 동안 `true` |
+| `/xtouch/state`              | `xtouch_midi/XTouchState` | 8채널 집계 상태 스냅샷                |
 
 ### 메시지 페이로드 예시
 
@@ -76,9 +86,22 @@ data: true      # 손가락 접촉
 ---
 data: false     # 손 떼는 순간
 ---
+
+# /xtouch/state  (예시 일부)
+stamp:
+  sec: 1714464000
+  nanosec: 123456789
+channels:
+- channel: 0
+  fader: 8192
+  fader_changed: true
+  touch: false
+  enabled: true
+  target_id: 101
 ```
 
-이벤트 기반 발행(주기 X)이므로, 장치 입력이 없으면 토픽에도 아무 값이 나오지 않습니다.
+이벤트 기반 발행(주기 X)이므로, 장치 입력이 없으면 토픽에도 아무 값도 나오지 않습니다.
+`enabled` 는 각 채널의 `Select` 버튼(Note `24..31`) 상태입니다.
 상세 프로토콜 매핑과 정규화 팁은 `README.md` 의 "메시지 형식" 참조.
 
 ## 트러블슈팅

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xtouch_midi CXX)
+project(xtouch_midi C CXX)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
@@ -11,18 +11,30 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(RTMIDI REQUIRED IMPORTED_TARGET rtmidi)
 
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/XTouchChannelState.msg"
+  "msg/XTouchState.msg"
+  DEPENDENCIES builtin_interfaces
+)
+
 add_executable(xtouch_node src/xtouch_node.cpp)
 ament_target_dependencies(xtouch_node rclcpp std_msgs)
 target_link_libraries(xtouch_node PkgConfig::RTMIDI)
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(xtouch_node "${cpp_typesupport_target}")
 
 install(TARGETS xtouch_node
   DESTINATION lib/${PROJECT_NAME}
 )
+
+ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()

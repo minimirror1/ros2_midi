@@ -17,6 +17,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,12 +30,16 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <xtouch_midi/msg/x_touch_channel_state.hpp>
+#include <xtouch_midi/msg/x_touch_state.hpp>
 
 namespace {
 
 constexpr std::size_t kNumChannels = 8;
 constexpr uint8_t kFaderTouchNoteStart = 104;  // 104..111
 constexpr uint8_t kFaderTouchNoteEnd = kFaderTouchNoteStart + kNumChannels - 1;
+constexpr uint8_t kSelectNoteStart = 24;       // 24..31
+constexpr uint8_t kSelectNoteEnd = kSelectNoteStart + kNumChannels - 1;
 constexpr int32_t kFaderValueMax = 16383;      // 14-bit
 constexpr auto kDebounceInterval = std::chrono::milliseconds(100);
 constexpr auto kDebounceTick     = std::chrono::milliseconds(50);
@@ -63,6 +68,8 @@ public:
   XTouchNode()
   : rclcpp::Node("xtouch_node")
   {
+    target_ids_ = load_target_ids();
+
     for (std::size_t i = 0; i < kNumChannels; ++i) {
       // ROS 2 topic name tokens cannot start with a digit, so we use "chN".
       const std::string suffix = "ch" + std::to_string(i);
@@ -71,6 +78,8 @@ public:
       touch_pubs_[i] = create_publisher<std_msgs::msg::Bool>(
         "/xtouch/touch/" + suffix, 10);
     }
+    state_pub_ = create_publisher<xtouch_midi::msg::XTouchState>(
+      "/xtouch/state", 10);
 
     midi_in_ = std::make_unique<RtMidiIn>();
     midi_in_->ignoreTypes(true, true, true);  // SysEx, timing, active sensing
@@ -87,8 +96,8 @@ public:
       std::bind(&XTouchNode::tick_debounce, this));
 
     RCLCPP_INFO(get_logger(),
-      "xtouch_node ready. Publishing 8 faders + 8 touches on /xtouch/...; "
-      "motor hold via 100 ms debounce echo.");
+      "xtouch_node ready. Publishing per-channel topics and /xtouch/state; "
+      "Select notes 24..31 map to enabled; motor hold via 100 ms debounce echo.");
   }
 
   ~XTouchNode() override
@@ -133,6 +142,48 @@ private:
     static_cast<XTouchNode *>(user_data)->on_midi(*msg);
   }
 
+  std::array<uint32_t, kNumChannels> load_target_ids()
+  {
+    const auto values = declare_parameter<std::vector<int64_t>>(
+      "target_ids", std::vector<int64_t>(kNumChannels, 0));
+    if (values.size() != kNumChannels) {
+      throw std::runtime_error(
+        "Parameter 'target_ids' must contain exactly 8 integer values.");
+    }
+
+    std::array<uint32_t, kNumChannels> target_ids{};
+    for (std::size_t i = 0; i < kNumChannels; ++i) {
+      if (values[i] < 0 || values[i] > UINT32_MAX) {
+        throw std::runtime_error(
+          "Parameter 'target_ids' entries must be in uint32 range.");
+      }
+      target_ids[i] = static_cast<uint32_t>(values[i]);
+    }
+    return target_ids;
+  }
+
+  void publish_state_snapshot()
+  {
+    xtouch_midi::msg::XTouchState state_msg;
+    state_msg.stamp = now();
+
+    {
+      std::lock_guard<std::mutex> lk(state_mutex_);
+      for (std::size_t i = 0; i < kNumChannels; ++i) {
+        auto & channel = state_msg.channels[i];
+        channel.channel = static_cast<uint8_t>(i);
+        channel.fader = current_fader_value_[i];
+        channel.fader_changed = current_fader_value_[i] != published_fader_value_[i];
+        channel.touch = touch_state_[i];
+        channel.enabled = enabled_state_[i];
+        channel.target_id = target_ids_[i];
+      }
+      published_fader_value_ = current_fader_value_;
+    }
+
+    state_pub_->publish(state_msg);
+  }
+
   void on_midi(const std::vector<unsigned char> & bytes)
   {
     if (bytes.size() < 3) { return; }
@@ -153,10 +204,12 @@ private:
       // device 100 ms after the user stops moving the fader.
       {
         std::lock_guard<std::mutex> lk(state_mutex_);
-        last_fader_value_[channel] = value;
+        current_fader_value_[channel] = value;
         debounce_deadline_[channel] =
           std::chrono::steady_clock::now() + kDebounceInterval;
       }
+
+      publish_state_snapshot();
 
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
         "fader[%u] = %d", channel, value);
@@ -173,7 +226,26 @@ private:
       std_msgs::msg::Bool m;
       m.data = touched;
       touch_pubs_[ch]->publish(m);
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        touch_state_[ch] = touched;
+      }
+      publish_state_snapshot();
       RCLCPP_INFO(get_logger(), "touch[%zu] = %s", ch, touched ? "down" : "up");
+      return;
+    }
+
+    // --- Select button used as per-channel enabled state (Note On/Off, 24..31) ---
+    if ((is_note_on || is_note_off)
+        && d1 >= kSelectNoteStart && d1 <= kSelectNoteEnd) {
+      const std::size_t ch = d1 - kSelectNoteStart;
+      const bool enabled = is_note_on && d2 > 0;  // vel 0 == note off
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        enabled_state_[ch] = enabled;
+      }
+      publish_state_snapshot();
+      RCLCPP_INFO(get_logger(), "enabled[%zu] = %s", ch, enabled ? "true" : "false");
       return;
     }
   }
@@ -188,7 +260,7 @@ private:
         std::lock_guard<std::mutex> lk(state_mutex_);
         if (debounce_deadline_[ch].has_value()
             && now >= *debounce_deadline_[ch]) {
-          value = last_fader_value_[ch];
+          value = current_fader_value_[ch];
           debounce_deadline_[ch].reset();
           fire = true;
         }
@@ -222,9 +294,14 @@ private:
     fader_pubs_;
   std::array<rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr, kNumChannels>
     touch_pubs_;
+  rclcpp::Publisher<xtouch_midi::msg::XTouchState>::SharedPtr state_pub_;
 
   std::mutex state_mutex_;
-  std::array<int32_t, kNumChannels> last_fader_value_{};
+  std::array<int32_t, kNumChannels> current_fader_value_{};
+  std::array<int32_t, kNumChannels> published_fader_value_{};
+  std::array<bool, kNumChannels> touch_state_{};
+  std::array<bool, kNumChannels> enabled_state_{};
+  std::array<uint32_t, kNumChannels> target_ids_{};
   std::array<std::optional<std::chrono::steady_clock::time_point>, kNumChannels>
     debounce_deadline_{};
 

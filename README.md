@@ -1,7 +1,7 @@
 # ros2_midi — X-Touch Extender → ROS 2 브리지
 
-**Behringer X-Touch Extender**의 8개 페이더(슬라이더) 위치와 터치 상태를 MIDI로 읽어
-ROS 2 토픽으로 퍼블리시하는 UI 없는 최소 ROS 2 노드입니다.
+**Behringer X-Touch Extender**의 8개 페이더(슬라이더) 위치, 터치 상태, Select 버튼 기반
+enable 상태를 MIDI로 읽어 ROS 2 토픽으로 퍼블리시하는 UI 없는 최소 ROS 2 노드입니다.
 
 ## 토픽
 
@@ -9,6 +9,7 @@ ROS 2 토픽으로 퍼블리시하는 UI 없는 최소 ROS 2 노드입니다.
 | -------------------------- | ------------------- | ----------------------------------- |
 | `/xtouch/fader/ch0..ch7`   | `std_msgs/Int32`    | 14-bit 페이더 위치, `0..16383`       |
 | `/xtouch/touch/ch0..ch7`   | `std_msgs/Bool`     | 페이더 터치 중일 때 `true`           |
+| `/xtouch/state`            | `xtouch_midi/XTouchState` | 8채널 전체 상태 스냅샷         |
 
 ## 사전 요구사항
 
@@ -39,6 +40,13 @@ source install/setup.bash
 ros2 run xtouch_midi xtouch_node
 ```
 
+`target_id` 를 채널별로 지정하려면 `target_ids` 파라미터에 길이 8의 정수 배열을 넘기면 됩니다.
+
+```bash
+ros2 run xtouch_midi xtouch_node --ros-args \
+  -p target_ids:="[101,102,103,104,105,106,107,108]"
+```
+
 노드는 기동 시 사용 가능한 MIDI 입력 포트 목록을 출력하고, 이름에
 `X-Touch`, `XTOUCH`, `Behringer` 중 하나가 포함된 첫 번째 포트에 자동 연결합니다.
 
@@ -48,9 +56,10 @@ ros2 run xtouch_midi xtouch_node
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 
-ros2 topic list | grep xtouch          # 총 16개 토픽
+ros2 topic list | grep xtouch          # 총 17개 토픽
 ros2 topic echo /xtouch/fader/ch0      # 1번 슬라이더를 움직이면 0..16383 값 출력
 ros2 topic echo /xtouch/touch/ch0      # 1번 슬라이더를 터치하면 true/false 출력
+ros2 topic echo /xtouch/state          # 8채널 전체 상태 스냅샷
 ```
 
 ---
@@ -106,10 +115,56 @@ data: false
 ---
 ```
 
+### 집계 상태 (`/xtouch/state`)
+
+**타입**: `xtouch_midi/msg/XTouchState`
+
+```text
+builtin_interfaces/Time stamp
+xtouch_midi/XTouchChannelState[8] channels
+
+# XTouchChannelState
+uint8 channel
+int32 fader
+bool fader_changed
+bool touch
+bool enabled
+uint32 target_id
+```
+
+- `channels[i].channel` 은 `0..7`.
+- `channels[i].fader` 는 현재 14-bit raw 페이더 값입니다.
+- `channels[i].fader_changed` 는 직전 `/xtouch/state` 발행 대비 값이 바뀌었을 때 `true` 입니다.
+- `channels[i].touch` 는 페이더 터치 상태입니다.
+- `channels[i].enabled` 는 해당 채널의 `Select` 버튼(Note `24..31`) 상태입니다.
+- `channels[i].target_id` 는 `target_ids` ROS 파라미터에서 읽은 `uint32` 값입니다.
+
+`ros2 topic echo /xtouch/state` 출력 예:
+
+```yaml
+stamp:
+  sec: 1714464000
+  nanosec: 123456789
+channels:
+- channel: 0
+  fader: 8192
+  fader_changed: true
+  touch: false
+  enabled: true
+  target_id: 101
+- channel: 1
+  fader: 0
+  fader_changed: false
+  touch: false
+  enabled: false
+  target_id: 102
+```
+
 ### 퍼블리시 규칙과 QoS
 
 - **이벤트 기반**: 주기적 발행이 아니라, 장치에서 MIDI 메시지가 도착한 순간에만 퍼블리시합니다.
-  페이더를 움직이지 않으면 토픽에 아무 값도 나오지 않습니다.
+  페이더를 움직이지 않으면 토픽에 아무 값도 나오지 않습니다. `/xtouch/state` 역시
+  페이더, 터치, Select 버튼 상태가 바뀌는 순간에만 발행됩니다.
 - **QoS**: 기본값 `RMW_QOS_POLICY_*_DEFAULT` (Reliable, Volatile, depth = 10).
   컨트롤 입력용이므로 과거 값 재생(Transient Local)은 하지 않습니다. 구독자가 늦게 붙으면
   다음 페이더 움직임부터 수신합니다.
