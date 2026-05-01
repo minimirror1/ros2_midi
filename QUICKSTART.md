@@ -39,7 +39,7 @@ ros2 run xtouch_midi xtouch_node --ros-args \
 [INFO] xtouch_node:   [i] X-Touch-Ext:X-Touch-Ext X-TOUCH_INT 20:0
 [INFO] xtouch_node: Connected MIDI input port: 'X-Touch-Ext:...'
 [INFO] xtouch_node: Connected MIDI output port: 'X-Touch-Ext:...'
-[INFO] xtouch_node: xtouch_node ready. Publishing per-channel topics and /xtouch/state; Select notes 24..31 map to enabled; motor hold via 100 ms debounce echo.
+[INFO] xtouch_node: xtouch_node ready. Publishing per-channel topics and /xtouch/state; Rec/Solo/Mute/Select (notes 0..31) toggle on press, mirrored on LEDs; motor hold via 100 ms debounce echo.
 ```
 
 ## 4. 토픽 확인 (다른 터미널)
@@ -96,12 +96,16 @@ channels:
   fader: 8192
   fader_changed: true
   touch: false
-  enabled: true
+  rec: false
+  solo: false
+  mute: true
+  select: true
   target_id: 101
 ```
 
 이벤트 기반 발행(주기 X)이므로, 장치 입력이 없으면 토픽에도 아무 값도 나오지 않습니다.
-`enabled` 는 각 채널의 `Select` 버튼(Note `24..31`) 상태입니다.
+`rec` / `solo` / `mute` / `select` 는 각 채널 strip 의 4종 버튼 토글 상태이며, 노드가 누름마다
+반전시켜 디바이스 LED 에 미러링합니다 (Note `0..31`, MIDI 채널 0).
 상세 프로토콜 매핑과 정규화 팁은 `README.md` 의 "메시지 형식" 참조.
 
 ## 트러블슈팅

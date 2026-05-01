@@ -1,7 +1,8 @@
 # ros2_midi — X-Touch Extender → ROS 2 브리지
 
-**Behringer X-Touch Extender**의 8개 페이더(슬라이더) 위치, 터치 상태, Select 버튼 기반
-enable 상태를 MIDI로 읽어 ROS 2 토픽으로 퍼블리시하는 UI 없는 최소 ROS 2 노드입니다.
+**Behringer X-Touch Extender**의 8개 페이더(슬라이더) 위치, 터치 상태, 그리고 채널별
+Rec/Solo/Mute/Select 버튼 토글 상태를 MIDI로 읽어 ROS 2 토픽으로 퍼블리시하는
+UI 없는 최소 ROS 2 노드입니다. 버튼 토글은 동시에 디바이스 LED 로 미러링됩니다.
 
 ## 토픽
 
@@ -128,7 +129,10 @@ uint8 channel
 int32 fader
 bool fader_changed
 bool touch
-bool enabled
+bool rec
+bool solo
+bool mute
+bool select
 uint32 target_id
 ```
 
@@ -136,7 +140,9 @@ uint32 target_id
 - `channels[i].fader` 는 현재 14-bit raw 페이더 값입니다.
 - `channels[i].fader_changed` 는 직전 `/xtouch/state` 발행 대비 값이 바뀌었을 때 `true` 입니다.
 - `channels[i].touch` 는 페이더 터치 상태입니다.
-- `channels[i].enabled` 는 해당 채널의 `Select` 버튼(Note `24..31`) 상태입니다.
+- `channels[i].rec` / `solo` / `mute` / `select` 는 각 채널 strip 의 4종 버튼 토글 상태입니다.
+  하드웨어는 누름/뗌 이벤트만 보내며, 노드가 누름마다 토글하고 LED 로 즉시 미러링합니다.
+  노드 시작 시 모두 `false` 이며 LED 도 꺼진 상태에서 시작합니다.
 - `channels[i].target_id` 는 `target_ids` ROS 파라미터에서 읽은 `uint32` 값입니다.
 
 `ros2 topic echo /xtouch/state` 출력 예:
@@ -150,21 +156,44 @@ channels:
   fader: 8192
   fader_changed: true
   touch: false
-  enabled: true
+  rec: false
+  solo: false
+  mute: true
+  select: true
   target_id: 101
 - channel: 1
   fader: 0
   fader_changed: false
   touch: false
-  enabled: false
+  rec: false
+  solo: false
+  mute: false
+  select: false
   target_id: 102
 ```
+
+### 채널 strip 버튼 (Rec / Solo / Mute / Select) 와 LED
+
+원본 MIDI 매핑 (MIDI 채널 0):
+
+| 버튼   | 노트 범위 | kind 인덱스 |
+| ------ | --------- | ----------- |
+| Rec    | `0..7`    | 0           |
+| Solo   | `8..15`   | 1           |
+| Mute   | `16..23`  | 2           |
+| Select | `24..31`  | 3           |
+
+- 입력: 누름 = `Note On` (vel > 0), 뗌 = `Note Off` 또는 `Note On` vel=0.
+  노드는 누름 이벤트에만 반응하여 해당 버튼의 토글 상태를 반전시킵니다.
+- 출력: 토글이 바뀔 때마다 즉시 같은 노트 번호로 `Note On` 송신.
+  vel `127` = LED ON, vel `0` = LED OFF.
+- 시작 시 32개 LED 모두 OFF 로 송신해 디바이스 LED 와 노드 내부 상태를 동기화합니다.
 
 ### 퍼블리시 규칙과 QoS
 
 - **이벤트 기반**: 주기적 발행이 아니라, 장치에서 MIDI 메시지가 도착한 순간에만 퍼블리시합니다.
   페이더를 움직이지 않으면 토픽에 아무 값도 나오지 않습니다. `/xtouch/state` 역시
-  페이더, 터치, Select 버튼 상태가 바뀌는 순간에만 발행됩니다.
+  페이더, 터치, 또는 Rec/Solo/Mute/Select 버튼 누름이 발생한 순간에만 발행됩니다.
 - **QoS**: 기본값 `RMW_QOS_POLICY_*_DEFAULT` (Reliable, Volatile, depth = 10).
   컨트롤 입력용이므로 과거 값 재생(Transient Local)은 하지 않습니다. 구독자가 늦게 붙으면
   다음 페이더 움직임부터 수신합니다.

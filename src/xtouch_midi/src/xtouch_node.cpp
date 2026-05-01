@@ -5,6 +5,10 @@
 // Protocol (from the Qt reference at reference/qt_midi_control/):
 //   - Fader move : Pitch Bend  0xE0 | ch, LSB, MSB   (ch 0..7, 14-bit value)
 //   - Fader touch: Note On/Off on notes 104..111     (note - 104 -> channel)
+//   - Channel-strip buttons: Note On/Off on notes 0..31, MIDI channel 0
+//       Rec    = 0..7,  Solo = 8..15,  Mute = 16..23,  Select = 24..31
+//     Hardware emits press/release only; this node maintains a per-button
+//     toggle and mirrors it to the device LED via Note On (vel 127=ON, 0=OFF).
 //
 // Motor hold (MC mode quirk): the motorised faders return to whatever position
 // the host last commanded. Without an OUT echo the motor reels every fader to
@@ -38,8 +42,15 @@ namespace {
 constexpr std::size_t kNumChannels = 8;
 constexpr uint8_t kFaderTouchNoteStart = 104;  // 104..111
 constexpr uint8_t kFaderTouchNoteEnd = kFaderTouchNoteStart + kNumChannels - 1;
-constexpr uint8_t kSelectNoteStart = 24;       // 24..31
-constexpr uint8_t kSelectNoteEnd = kSelectNoteStart + kNumChannels - 1;
+// Channel-strip buttons (4 kinds × 8 channels = notes 0..31), MCU mapping.
+// kind index: 0=Rec, 1=Solo, 2=Mute, 3=Select.
+constexpr std::size_t kNumButtonKinds = 4;
+constexpr uint8_t kButtonNoteStart = 0;
+constexpr uint8_t kButtonNoteEnd = kButtonNoteStart
+  + kNumButtonKinds * kNumChannels - 1;  // 31
+constexpr uint8_t kLedVelocityOn  = 127;
+constexpr uint8_t kLedVelocityOff = 0;
+constexpr uint8_t kLedMidiChannel = 0;
 constexpr int32_t kFaderValueMax = 16383;      // 14-bit
 constexpr auto kDebounceInterval = std::chrono::milliseconds(100);
 constexpr auto kDebounceTick     = std::chrono::milliseconds(50);
@@ -88,6 +99,12 @@ public:
     midi_out_ = std::make_unique<RtMidiOut>();
     open_matching_port(*midi_out_, "output");
 
+    // Initialize all channel-strip button LEDs to OFF so the device matches
+    // our internal toggle state (all false) right after startup.
+    for (uint8_t note = kButtonNoteStart; note <= kButtonNoteEnd; ++note) {
+      send_button_led(note, false);
+    }
+
     // Start input callback only after OUT is ready, so the first incoming
     // Pitch Bend can be echoed back without races.
     midi_in_->setCallback(&XTouchNode::midi_trampoline, this);
@@ -97,7 +114,8 @@ public:
 
     RCLCPP_INFO(get_logger(),
       "xtouch_node ready. Publishing per-channel topics and /xtouch/state; "
-      "Select notes 24..31 map to enabled; motor hold via 100 ms debounce echo.");
+      "Rec/Solo/Mute/Select (notes 0..31) toggle on press, mirrored on LEDs; "
+      "motor hold via 100 ms debounce echo.");
   }
 
   ~XTouchNode() override
@@ -175,7 +193,10 @@ private:
         channel.fader = current_fader_value_[i];
         channel.fader_changed = current_fader_value_[i] != published_fader_value_[i];
         channel.touch = touch_state_[i];
-        channel.enabled = enabled_state_[i];
+        channel.rec    = button_state_[0][i];
+        channel.solo   = button_state_[1][i];
+        channel.mute   = button_state_[2][i];
+        channel.select = button_state_[3][i];
         channel.target_id = target_ids_[i];
       }
       published_fader_value_ = current_fader_value_;
@@ -235,17 +256,32 @@ private:
       return;
     }
 
-    // --- Select button used as per-channel enabled state (Note On/Off, 24..31) ---
-    if ((is_note_on || is_note_off)
-        && d1 >= kSelectNoteStart && d1 <= kSelectNoteEnd) {
-      const std::size_t ch = d1 - kSelectNoteStart;
-      const bool enabled = is_note_on && d2 > 0;  // vel 0 == note off
+    // --- Channel-strip buttons (Note 0..31): Rec/Solo/Mute/Select ---
+    // The device only emits press/release events; we maintain toggle state in
+    // software and mirror it on the LED. Release events are ignored so a press
+    // produces exactly one toggle.
+    if (is_note_on && d2 > 0
+        && d1 >= kButtonNoteStart && d1 <= kButtonNoteEnd) {
+      const std::size_t kind = (d1 - kButtonNoteStart) / kNumChannels;
+      const std::size_t ch   = (d1 - kButtonNoteStart) % kNumChannels;
+      bool new_state;
       {
         std::lock_guard<std::mutex> lk(state_mutex_);
-        enabled_state_[ch] = enabled;
+        button_state_[kind][ch] = !button_state_[kind][ch];
+        new_state = button_state_[kind][ch];
       }
+      send_button_led(d1, new_state);
       publish_state_snapshot();
-      RCLCPP_INFO(get_logger(), "enabled[%zu] = %s", ch, enabled ? "true" : "false");
+      static constexpr const char * kKindName[kNumButtonKinds] = {
+        "rec", "solo", "mute", "select"
+      };
+      RCLCPP_INFO(get_logger(), "%s[%zu] = %s",
+        kKindName[kind], ch, new_state ? "on" : "off");
+      return;
+    }
+    if ((is_note_on || is_note_off)
+        && d1 >= kButtonNoteStart && d1 <= kButtonNoteEnd) {
+      // Release / vel=0 — explicitly ignored; toggling already happened on press.
       return;
     }
   }
@@ -287,6 +323,21 @@ private:
     }
   }
 
+  void send_button_led(uint8_t note, bool on)
+  {
+    std::vector<unsigned char> bytes = {
+      static_cast<unsigned char>(0x90 | (kLedMidiChannel & 0x0F)),
+      note,
+      static_cast<unsigned char>(on ? kLedVelocityOn : kLedVelocityOff),
+    };
+    try {
+      midi_out_->sendMessage(&bytes);
+    } catch (const RtMidiError & e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "MIDI out (LED) failed on note %u: %s", note, e.what());
+    }
+  }
+
   std::unique_ptr<RtMidiIn>  midi_in_;
   std::unique_ptr<RtMidiOut> midi_out_;
 
@@ -300,7 +351,8 @@ private:
   std::array<int32_t, kNumChannels> current_fader_value_{};
   std::array<int32_t, kNumChannels> published_fader_value_{};
   std::array<bool, kNumChannels> touch_state_{};
-  std::array<bool, kNumChannels> enabled_state_{};
+  // [0]=Rec, [1]=Solo, [2]=Mute, [3]=Select.
+  std::array<std::array<bool, kNumChannels>, kNumButtonKinds> button_state_{};
   std::array<uint32_t, kNumChannels> target_ids_{};
   std::array<std::optional<std::chrono::steady_clock::time_point>, kNumChannels>
     debounce_deadline_{};

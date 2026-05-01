@@ -2,5 +2,8 @@ uint8 channel
 int32 fader
 bool fader_changed
 bool touch
-bool enabled
+bool rec
+bool solo
+bool mute
+bool select
 uint32 target_id
