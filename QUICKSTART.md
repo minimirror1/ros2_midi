@@ -39,7 +39,7 @@ ros2 run xtouch_midi xtouch_node --ros-args \
 [INFO] xtouch_node:   [i] X-Touch-Ext:X-Touch-Ext X-TOUCH_INT 20:0
 [INFO] xtouch_node: Connected MIDI input port: 'X-Touch-Ext:...'
 [INFO] xtouch_node: Connected MIDI output port: 'X-Touch-Ext:...'
-[INFO] xtouch_node: xtouch_node ready. Publishing per-channel topics and /xtouch/state; Rec/Solo/Mute/Select (notes 0..31) toggle on press, mirrored on LEDs; motor hold via 100 ms debounce echo.
+[INFO] xtouch_node: xtouch_node ready. Publishing per-channel topics and /xtouch/state; Rec/Solo/Mute/Select (notes 0..31) toggle on press, mirrored on LEDs; encoder rotate (CC 80..87) drives internal 0..11 counter and LED ring (CC 48..55, mode 2); motor hold via 100 ms debounce echo.
 ```
 
 ## 4. 토픽 확인 (다른 터미널)

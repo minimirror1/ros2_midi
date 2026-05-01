@@ -9,6 +9,13 @@
 //       Rec    = 0..7,  Solo = 8..15,  Mute = 16..23,  Select = 24..31
 //     Hardware emits press/release only; this node maintains a per-button
 //     toggle and mirrors it to the device LED via Note On (vel 127=ON, 0=OFF).
+//   - Encoder push : Note On/Off on notes 32..39 (toggled internally only;
+//                    no external observable effect, kept for future use).
+//   - Encoder rotate (MC mode): CC 80..87, value 1..63 = CW (delta +1),
+//                    65..127 = CCW (delta -1). Counter is per-channel,
+//                    saturated to 0..11, and used internally only.
+//   - Encoder LED ring: CC 48..55, value = (mode << 4) | position.
+//                    Mode 2 = Wrap fill from left; position 0..11 = LED count.
 //
 // Motor hold (MC mode quirk): the motorised faders return to whatever position
 // the host last commanded. Without an OUT echo the motor reels every fader to
@@ -51,6 +58,17 @@ constexpr uint8_t kButtonNoteEnd = kButtonNoteStart
 constexpr uint8_t kLedVelocityOn  = 127;
 constexpr uint8_t kLedVelocityOff = 0;
 constexpr uint8_t kLedMidiChannel = 0;
+// Encoder (MC mode): push as Note 32..39, rotate as CC 80..87 (relative),
+// LED ring as CC 48..55 with value = (mode<<4)|position.
+constexpr uint8_t kEncoderPushNoteStart = 32;  // 32..39
+constexpr uint8_t kEncoderPushNoteEnd   =
+  kEncoderPushNoteStart + kNumChannels - 1;
+constexpr uint8_t kEncoderRotateCcStart = 80;  // 80..87
+constexpr uint8_t kEncoderRotateCcEnd   =
+  kEncoderRotateCcStart + kNumChannels - 1;
+constexpr uint8_t kEncoderLedRingCcStart = 48;  // 48..55
+constexpr uint8_t kEncoderRingMaxPosition = 11;
+constexpr uint8_t kEncoderRingFillMode    = 2;  // Wrap: fill from left
 constexpr int32_t kFaderValueMax = 16383;      // 14-bit
 constexpr auto kDebounceInterval = std::chrono::milliseconds(100);
 constexpr auto kDebounceTick     = std::chrono::milliseconds(50);
@@ -105,6 +123,12 @@ public:
       send_button_led(note, false);
     }
 
+    // Initialize all encoder LED rings to position 0 (no LED lit) so the ring
+    // matches encoder_count_ which starts at 0.
+    for (std::size_t ch = 0; ch < kNumChannels; ++ch) {
+      send_encoder_led_ring(ch, 0);
+    }
+
     // Start input callback only after OUT is ready, so the first incoming
     // Pitch Bend can be echoed back without races.
     midi_in_->setCallback(&XTouchNode::midi_trampoline, this);
@@ -115,7 +139,8 @@ public:
     RCLCPP_INFO(get_logger(),
       "xtouch_node ready. Publishing per-channel topics and /xtouch/state; "
       "Rec/Solo/Mute/Select (notes 0..31) toggle on press, mirrored on LEDs; "
-      "motor hold via 100 ms debounce echo.");
+      "encoder rotate (CC 80..87) drives internal 0..11 counter and LED ring "
+      "(CC 48..55, mode 2); motor hold via 100 ms debounce echo.");
   }
 
   ~XTouchNode() override
@@ -284,6 +309,56 @@ private:
       // Release / vel=0 — explicitly ignored; toggling already happened on press.
       return;
     }
+
+    // --- Encoder push (Note 32..39) ---
+    // Internal toggle only; no LED, no message field, no topic. Reserved for
+    // future use.
+    if (is_note_on && d2 > 0
+        && d1 >= kEncoderPushNoteStart && d1 <= kEncoderPushNoteEnd) {
+      const std::size_t ch = d1 - kEncoderPushNoteStart;
+      bool new_state;
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        encoder_push_state_[ch] = !encoder_push_state_[ch];
+        new_state = encoder_push_state_[ch];
+      }
+      RCLCPP_INFO(get_logger(), "encoder_push[%zu] = %s",
+        ch, new_state ? "on" : "off");
+      return;
+    }
+    if ((is_note_on || is_note_off)
+        && d1 >= kEncoderPushNoteStart && d1 <= kEncoderPushNoteEnd) {
+      return;  // ignore release / vel=0
+    }
+
+    // --- Encoder rotate (CC 80..87, MC mode relative) ---
+    // value 1..63 = CW (+1), 65..127 = CCW (-1). Counter saturates at 0..11
+    // and is mirrored on the LED ring (CC 48..55, mode 2 = wrap fill).
+    const bool is_cc = (status == 0xB0);
+    if (is_cc
+        && d1 >= kEncoderRotateCcStart && d1 <= kEncoderRotateCcEnd) {
+      int delta = 0;
+      if (d2 >= 1 && d2 <= 63) {
+        delta = +1;
+      } else if (d2 >= 65 && d2 <= 127) {
+        delta = -1;
+      }
+      if (delta == 0) { return; }
+
+      const std::size_t ch = d1 - kEncoderRotateCcStart;
+      uint8_t new_count;
+      {
+        std::lock_guard<std::mutex> lk(state_mutex_);
+        const int next = static_cast<int>(encoder_count_[ch]) + delta;
+        new_count = static_cast<uint8_t>(
+          std::clamp(next, 0, static_cast<int>(kEncoderRingMaxPosition)));
+        encoder_count_[ch] = new_count;
+      }
+      send_encoder_led_ring(ch, new_count);
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 200,
+        "encoder[%zu] = %u", ch, new_count);
+      return;
+    }
   }
 
   void tick_debounce()
@@ -338,6 +413,24 @@ private:
     }
   }
 
+  void send_encoder_led_ring(std::size_t ch, uint8_t position)
+  {
+    position = std::min(position, kEncoderRingMaxPosition);
+    const uint8_t value =
+      static_cast<uint8_t>((kEncoderRingFillMode << 4) | position);
+    std::vector<unsigned char> bytes = {
+      static_cast<unsigned char>(0xB0 | (kLedMidiChannel & 0x0F)),
+      static_cast<unsigned char>(kEncoderLedRingCcStart + ch),
+      value,
+    };
+    try {
+      midi_out_->sendMessage(&bytes);
+    } catch (const RtMidiError & e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "MIDI out (encoder ring) failed on ch %zu: %s", ch, e.what());
+    }
+  }
+
   std::unique_ptr<RtMidiIn>  midi_in_;
   std::unique_ptr<RtMidiOut> midi_out_;
 
@@ -353,6 +446,10 @@ private:
   std::array<bool, kNumChannels> touch_state_{};
   // [0]=Rec, [1]=Solo, [2]=Mute, [3]=Select.
   std::array<std::array<bool, kNumChannels>, kNumButtonKinds> button_state_{};
+  // Encoder rotation counter (0..kEncoderRingMaxPosition), mirrored on LED ring.
+  std::array<uint8_t, kNumChannels> encoder_count_{};
+  // Encoder push toggle. Internal-only; not exposed externally.
+  std::array<bool, kNumChannels> encoder_push_state_{};
   std::array<uint32_t, kNumChannels> target_ids_{};
   std::array<std::optional<std::chrono::steady_clock::time_point>, kNumChannels>
     debounce_deadline_{};
