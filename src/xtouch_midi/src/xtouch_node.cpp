@@ -69,6 +69,13 @@ constexpr uint8_t kEncoderRotateCcEnd   =
 constexpr uint8_t kEncoderLedRingCcStart = 48;  // 48..55
 constexpr uint8_t kEncoderRingMaxPosition = 11;
 constexpr uint8_t kEncoderRingFillMode    = 2;  // Wrap: fill from left
+constexpr uint8_t kMcuManufacturerId1 = 0x00;
+constexpr uint8_t kMcuManufacturerId2 = 0x00;
+constexpr uint8_t kMcuManufacturerId3 = 0x66;
+constexpr uint8_t kMcuExtenderDeviceId = 0x15;
+constexpr uint8_t kMcuLcdCommand = 0x12;
+constexpr uint8_t kMcuLcdLowerBase = 0x38;
+constexpr std::size_t kLcdLineLength = 7;
 constexpr int32_t kFaderValueMax = 16383;      // 14-bit
 constexpr auto kDebounceInterval = std::chrono::milliseconds(100);
 constexpr auto kDebounceTick     = std::chrono::milliseconds(50);
@@ -86,6 +93,24 @@ bool looks_like_xtouch(const std::string & port_name)
   return up.find("X-TOUCH") != std::string::npos
       || up.find("XTOUCH")  != std::string::npos
       || up.find("BEHRINGER") != std::string::npos;
+}
+
+std::string format_lcd_text(const std::string & text)
+{
+  std::string formatted;
+  formatted.reserve(kLcdLineLength);
+
+  for (char c : text) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    formatted.push_back((uc >= 32 && uc <= 126) ? c : ' ');
+    if (formatted.size() == kLcdLineLength) {
+      break;
+    }
+  }
+  while (formatted.size() < kLcdLineLength) {
+    formatted.push_back(' ');
+  }
+  return formatted;
 }
 
 }  // namespace
@@ -129,6 +154,12 @@ public:
       send_encoder_led_ring(ch, 0);
     }
 
+    // Initialize LCD scribble strips to a known state.
+    for (std::size_t ch = 0; ch < kNumChannels; ++ch) {
+      send_lcd_upper_label(ch);
+      send_lcd_lower_value(ch, 0);
+    }
+
     // Start input callback only after OUT is ready, so the first incoming
     // Pitch Bend can be echoed back without races.
     midi_in_->setCallback(&XTouchNode::midi_trampoline, this);
@@ -140,7 +171,8 @@ public:
       "xtouch_node ready. Publishing per-channel topics and /xtouch/state; "
       "Rec/Solo/Mute/Select (notes 0..31) toggle on press, mirrored on LEDs; "
       "encoder rotate (CC 80..87) drives internal 0..11 counter and LED ring "
-      "(CC 48..55, mode 2); motor hold via 100 ms debounce echo.");
+      "(CC 48..55, mode 2); LCD upper=CHn/lower=fader value via MCU SysEx; "
+      "motor hold via 100 ms debounce echo.");
   }
 
   ~XTouchNode() override
@@ -255,6 +287,7 @@ private:
           std::chrono::steady_clock::now() + kDebounceInterval;
       }
 
+      send_lcd_lower_value(channel, value);
       publish_state_snapshot();
 
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
@@ -395,6 +428,44 @@ private:
     } catch (const RtMidiError & e) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
         "MIDI out failed on ch %u: %s", ch, e.what());
+    }
+  }
+
+  void send_lcd_upper_label(std::size_t ch)
+  {
+    send_lcd_text(static_cast<uint8_t>(ch * kLcdLineLength),
+      "CH" + std::to_string(ch + 1));
+  }
+
+  void send_lcd_lower_value(std::size_t ch, int32_t value)
+  {
+    value = std::clamp<int32_t>(value, 0, kFaderValueMax);
+    send_lcd_text(static_cast<uint8_t>(kMcuLcdLowerBase + ch * kLcdLineLength),
+      std::to_string(value));
+  }
+
+  void send_lcd_text(uint8_t position, const std::string & text)
+  {
+    const std::string formatted = format_lcd_text(text);
+    std::vector<unsigned char> bytes = {
+      0xF0,
+      kMcuManufacturerId1,
+      kMcuManufacturerId2,
+      kMcuManufacturerId3,
+      kMcuExtenderDeviceId,
+      kMcuLcdCommand,
+      position,
+    };
+    bytes.reserve(7 + kLcdLineLength + 1);
+    for (char c : formatted) {
+      bytes.push_back(static_cast<unsigned char>(c));
+    }
+    bytes.push_back(0xF7);
+    try {
+      midi_out_->sendMessage(&bytes);
+    } catch (const RtMidiError & e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "MIDI out (LCD) failed at pos 0x%02x: %s", position, e.what());
     }
   }
 
